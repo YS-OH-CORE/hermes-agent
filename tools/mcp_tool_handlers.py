@@ -210,7 +210,8 @@ def _take_recorded_401(server_name: str) -> bool:
             srv = _core._servers.get(_resolve_server_key(server_name))
         if not _is_recorded_auth_error(srv):
             return False
-        srv._http_rejection = {}
+        # The live response hook captures this dict; keep it attached for later responses.
+        srv._http_rejection.clear()
         return True
     except Exception:
         return False  # a lookup failure must not change the call's outcome
