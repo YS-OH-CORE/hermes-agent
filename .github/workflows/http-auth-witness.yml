@@ -1,0 +1,45 @@
+name: MCP HTTP auth attribution witness
+
+on:
+  push:
+    branches: [verify/pr-114591-get-401-witness-20260928]
+
+permissions:
+  contents: read
+
+jobs:
+  original:
+    if: github.repository == 'YS-OH-CORE/hermes-agent' && github.ref == 'refs/heads/verify/pr-114591-get-401-witness-20260928'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Preserve the review test and receipt driver
+        run: |
+          cp tests/tools/test_mcp_http_auth_witness.py "$RUNNER_TEMP/http-auth-witness-test.py"
+          cp scripts/review/http_auth_witness_ci.py "$RUNNER_TEMP/http-auth-witness-ci.py"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 646031aa6c87f118e8c0a9b8d4feb79b32fba93c
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: '0.9.28'
+          enable-cache: false
+      - name: Create a fresh locked Python environment
+        run: |
+          uv python install 3.11
+          uv sync --locked --python 3.11 --extra dev
+      - name: Run the three cases and retain the actual regression failure
+        run: .venv/bin/python "$RUNNER_TEMP/http-auth-witness-ci.py"
+      - name: Upload bounded test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: http-auth-witness-original
+          path: ${{ runner.temp }}/http-auth-witness-receipt
+          if-no-files-found: warn
+          retention-days: 30
