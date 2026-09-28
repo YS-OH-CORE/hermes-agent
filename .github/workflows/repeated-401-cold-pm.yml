@@ -1,0 +1,110 @@
+name: Review repeated MCP 401 with fresh PM environments
+
+on:
+  push:
+    branches:
+      - verify/pr-125991-refreshed-pm-20260929
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'YS-OH-CORE/hermes-agent' &&
+      github.ref == 'refs/heads/verify/pr-125991-refreshed-pm-20260929'
+    name: ${{ matrix.lane }} (fresh PM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - lane: original
+            ref: ce962e05ad9acbfa75f506da7b635236a96d733a
+          - lane: candidate
+            ref: 861f94dc4326b9de45fff009202b48415aadb9bc
+    steps:
+      - name: Check out the verification definition
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Preserve the driver and frozen test outside the runtime checkout
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/repeated-401-harness"
+          cp scripts/review/repeated_401_ci.py "$RUNNER_TEMP/repeated-401-harness/driver.py"
+          cp tests/e2e/core/mcp_plugins/test_mcp_streamable_http.py "$RUNNER_TEMP/repeated-401-harness/frozen_test.py"
+
+      - name: Check out the exact runtime commit in full
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+          clean: true
+
+      - name: Record source provenance and apply the same frozen test
+        id: inputs
+        env:
+          REVIEW_LANE: ${{ matrix.lane }}
+        run: |
+          python3 "$RUNNER_TEMP/repeated-401-harness/driver.py" prepare "$REVIEW_LANE" \
+            "$RUNNER_TEMP/repeated-401-receipts" \
+            --frozen-test "$RUNNER_TEMP/repeated-401-harness/frozen_test.py"
+
+      - name: Install the committed PM toolchain without restoring caches
+        id: toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+
+      - name: Check committed locks and build a new dev and test environment
+        id: dependencies
+        run: |
+          set -euo pipefail
+          "$HERMES_PYTHON" -m pm.build_env --source "$GITHUB_WORKSPACE" --check-lock
+          "$HERMES_PYTHON" -m pm.build_env --source "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/hermes-mcp-test-env" --group dev --group test
+          printf 'HERMES_PYTHON=%s\n' "$RUNNER_TEMP/hermes-mcp-test-env/bin/python" >> "$GITHUB_ENV"
+
+      - name: Run the canonical runner and inspect exact test outcomes
+        id: verification
+        env:
+          REVIEW_LANE: ${{ matrix.lane }}
+        run: |
+          "$HERMES_PYTHON" "$RUNNER_TEMP/repeated-401-harness/driver.py" verify "$REVIEW_LANE" \
+            "$RUNNER_TEMP/repeated-401-receipts"
+
+      - name: Record workflow preparation and verification outcomes
+        if: always()
+        env:
+          REVIEW_LANE: ${{ matrix.lane }}
+          INPUTS_OUTCOME: ${{ steps.inputs.outcome }}
+          TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          VERIFICATION_OUTCOME: ${{ steps.verification.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/repeated-401-receipts"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          keys = ('REVIEW_LANE', 'INPUTS_OUTCOME', 'TOOLCHAIN_OUTCOME',
+                  'DEPENDENCIES_OUTCOME', 'VERIFICATION_OUTCOME')
+          path = Path(os.environ['RUNNER_TEMP']) / 'repeated-401-receipts' / 'workflow-outcomes.json'
+          path.write_text(json.dumps({k: os.environ[k] for k in keys}, indent=2) + '\n')
+          PY
+
+      - name: Upload verification receipts including any preparation failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: repeated-401-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/repeated-401-receipts/
+          if-no-files-found: error
+          retention-days: 30
