@@ -42,9 +42,10 @@ tool requests, and the absence of another initialize/tools/list after the first
 tool request. These checks guard against reconnects or replays explaining the
 observed result. They make no claim about TCP socket reuse.
 
-The server waits for a second GET request before permitting the test to advance.
-Since the SDK retries after processing the first response, this establishes
-that the first real response hook has already run. The test neither patches
+The test waits for a second GET carrying this fixture's MCP session identifier.
+The initial connection preflight has no session identifier and is excluded.
+Since the SDK retries after processing the first session-bearing response, this
+establishes that the first real response hook has already run. The test neither patches
 the classifier/transport nor reads or changes the private 401 timestamp.
 The production RPC lock remains active. The canonical fixtures provide a fresh
 temporary HERMES_HOME and remove credentials.

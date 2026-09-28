@@ -25,18 +25,20 @@ def _http_server(get_status: int, call_status: int):
     wire_lock = threading.Lock()
     get_retried = threading.Event()
 
-    def record(method, status, message=None):
+    def record(method, status, message=None, *, session_attached=False):
         row = {"http_method": method, "status": status}
+        if method == "GET":
+            row["session_attached"] = session_attached
         if message is not None:
             row.update({"rpc_method": message.get("method"), "id": message.get("id")})
             if message.get("method") == "tools/call":
                 row["mode"] = message.get("params", {}).get("arguments", {}).get("mode")
         with wire_lock:
             wire.append(row)
-            # A second GET proves that the SDK processed the first response,
-            # including the real response hook, before retrying. No sleeps or
-            # reads/writes of Hermes' private marker are needed to order the case.
-            if method == "GET" and sum(r["http_method"] == "GET" for r in wire) >= 2:
+            # Ignore the connection preflight: only session-bearing GETs come
+            # from the SDK's background reader. Its retry proves that the first
+            # real response hook ran, without inspecting the private 401 marker.
+            if method == "GET" and sum(r.get("session_attached", False) for r in wire) >= 2:
                 get_retried.set()
 
     class Handler(BaseHTTPRequestHandler):
@@ -58,7 +60,8 @@ def _http_server(get_status: int, call_status: int):
             self.wfile.flush()
 
         def do_GET(self):
-            record("GET", get_status)
+            record("GET", get_status,
+                   session_attached=self.headers.get("Mcp-Session-Id") == "http-auth-witness")
             self.respond(get_status, {"error": "synthetic GET rejection"})
 
         def do_DELETE(self):
