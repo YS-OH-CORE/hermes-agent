@@ -7,8 +7,8 @@ the tool results the model saw on the next provider request:
 
 * a no-required-param tool receives ``arguments: {}`` over HTTP and no information-free
   ``params._meta`` (some hosted servers reject ``_meta: {}`` with HTTP 400, #120923);
-* a 401 on ``tools/call`` takes the auth recovery path (the model is told the server needs
-  authentication, #121285) and never poisons the connection: the next call succeeds;
+* repeated 401s on ``tools/call`` each take the auth recovery path on the same connection
+  (#121285), and the following successful call remains usable;
 * the server crashing mid-call fails THAT call as a tool error (the turn still completes, the
   call is not replayed), and after the server comes back the next turn in the same long-lived
   host session reaches the new server process.
@@ -17,7 +17,6 @@ the tool results the model saw on the next provider request:
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -106,28 +105,33 @@ def test_no_information_free_meta_is_sent_over_http(shape: dict[str, Any], reque
 
 @pytest.fixture(scope="module")
 def unauthorized(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    return _one_turn(tmp_path_factory.mktemp("unauth"), [("noargs_probe", {}), ("noargs_probe", {})],
-                     unauthorized_calls=1)
+    return _one_turn(tmp_path_factory.mktemp("unauth"), [("noargs_probe", {}) for _ in range(3)],
+                     unauthorized_calls=2)
 
 
-def test_401_on_tools_call_is_reported_as_an_auth_failure(unauthorized: dict[str, Any],
-                                                          request: pytest.FixtureRequest) -> None:
-    assert any("injected_401_for" in m for m in inbound(unauthorized["log"]) if isinstance(m, dict)), (
-        "fixture never answered 401 (vacuous)")
-    first = payload(unauthorized["results"][0])
-    assert "error" in first, first
-    with known_gate(KNOWN, request.node.name, raises=KnownSymptom):
-        symptom(re.search(r"auth|401|sign.?in|credential", json.dumps(first), re.I),
-                f"a 401 on tools/call reached the model without any sign it is an auth failure: {first}")
+def test_401_on_tools_call_is_reported_as_an_auth_failure(unauthorized: dict[str, Any]) -> None:
+    messages = inbound(unauthorized["log"])
+    calls = [m for m in messages if isinstance(m, dict) and m.get("method") == "tools/call"]
+    results = [payload(r) for r in unauthorized["results"]]
+    assert len(calls) == len(results) == 3, (calls, results)
+    rejected = [m["injected_401_for"] for m in messages if isinstance(m, dict) and "injected_401_for" in m]
+    assert rejected == [m["id"] for m in calls[:2]], (rejected, calls)
+    # A reconnect would install a new recorder and hide a broken live-hook reference.
+    after_first_call = messages[messages.index(calls[0]) + 1:]
+    assert not [m for m in after_first_call if isinstance(m, dict)
+                and m.get("method") in {"initialize", "server/discover"}], after_first_call
+    assert [(r.get("needs_reauth"), r.get("server")) for r in results[:2]] == [
+        (True, SERVER), (True, SERVER)
+    ], results
 
 
 def test_the_call_after_a_401_reaches_the_server(unauthorized: dict[str, Any]) -> None:
     served = [m for m in inbound(unauthorized["log"])
               if isinstance(m, dict) and m.get("method") == "tools/call"]
-    assert len(served) >= 2, f"the call after the 401 never reached the server: {served}"
-    second = payload(unauthorized["results"][-1])
-    assert f"NOARGS:{unauthorized['canary']}" in json.dumps(second), (
-        f"the connection stayed broken after one 401: {second}")
+    assert len(served) == 3, f"the call after the two 401s never reached the server: {served}"
+    last = payload(unauthorized["results"][-1])
+    assert "error" not in last and f"NOARGS:{unauthorized['canary']}" in json.dumps(last), (
+        f"the connection stayed broken after two 401s: {last}")
 
 
 # Crash mid-call, then reconnect in the same long-lived session ------------------------------------
