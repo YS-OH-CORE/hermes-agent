@@ -1,7 +1,9 @@
 name: Review repeated MCP 401 with fresh PM environments
 
 on:
-  create:
+  push:
+    branches:
+      - verify/pr-125991-cold-pm-20260928
 
 permissions:
   contents: read
@@ -10,7 +12,6 @@ jobs:
   verify:
     if: >-
       github.repository == 'YS-OH-CORE/hermes-agent' &&
-      github.event.ref_type == 'branch' &&
       github.ref == 'refs/heads/verify/pr-125991-cold-pm-20260928'
     name: ${{ matrix.lane }} (fresh PM)
     runs-on: ubuntu-latest
